@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         UMS Placement Drive Tracker
 // @namespace    namit.ums.drive.tracker
-// @version      3.0
-// @description  Keeps the last 10 registered placement drives (from the UMS Drive Registration page) in an Excel file
+// @version      4.0
+// @description  Keeps your last 10 registered placement drives (from the UMS Drive Registration page) in an Excel file
 // @match        https://ums.lpu.in/Placements/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -15,7 +15,7 @@
 
   /* ------------------------------ CONFIG ------------------------------ */
   const CFG = {
-    maxDrives: 10,                       // how many registered drives to keep in the file
+    maxDrives: 10,                       // how many registered drives to keep
     tableSelector: 'table[id$="gdvPlacement"]',
     registrationPageUrl: '/Placements/frmPlacementDriveRegistration.aspx',
     autoFetchEveryMin: 60,               // background refresh interval on other Placements pages
@@ -31,18 +31,13 @@
   /* ------------------------------ helpers ------------------------------ */
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const today = () => new Date().toISOString().slice(0, 10);
-  const stamp = () => new Date().toLocaleString('en-IN');
   const load = () => { try { return JSON.parse(GM_getValue(KEY, '{}')); } catch (e) { return {}; } };
   const saveData = (d) => GM_setValue(KEY, JSON.stringify(d));
 
   // Drive Registration page columns (the home-page table has no "Drive Code", so it is ignored)
   const COLS = {
     code: /^drive code/i,
-    driveDate: /^drive date/i,
-    registerBy: /^register by/i,
     company: /^company/i,
-    venue: /^venue/i,
-    driveStatus: /^status$/i,
     registered: /^registered$/i,
   };
 
@@ -59,10 +54,10 @@
     return map.code !== undefined && map.company !== undefined && map.registered !== undefined ? map : null;
   }
 
-  // Decide registration state from the text of the "Registered" cell
+  // Decide state from the text of the "Registered" cell
   //   "Click to Cancel Registration" -> registered
   //   "Click to Register"            -> not registered
-  //   anything else                  -> unknown (existing status is left untouched)
+  //   anything else                  -> unknown (stored drives are left untouched)
   function registrationState(text) {
     if (/cancel/i.test(text)) return 'registered';
     if (/click to register/i.test(text)) return 'not';
@@ -79,32 +74,24 @@
       Array.from(table.rows).slice(1).forEach((row) => {
         const c = row.cells;
         if (row.querySelector('th') || c.length <= maxIdx) return;
-        const t = (i) => (i === undefined ? '' : norm(c[i].textContent));
-        const code = t(map.code);
+        const code = norm(c[map.code].textContent);
         if (!code) return;
-        const portalText = t(map.registered);
         entries.push({
           code,
-          company: t(map.company),
-          registerBy: t(map.registerBy),
-          driveDate: t(map.driveDate),
-          venue: t(map.venue),
-          driveStatus: t(map.driveStatus),
-          portalText,
-          state: registrationState(portalText),
+          company: norm(c[map.company].textContent),
+          state: registrationState(norm(c[map.registered].textContent)),
         });
       });
     });
     return entries;
   }
 
-  // Registered first, then newest registration date, then position on the portal page (top = newest)
+  // Newest registration date first, then position on the portal page (top = newest)
   const cmp = (a, b) =>
-    Number(b.registration === 'Registered') - Number(a.registration === 'Registered') ||
     (b.registeredOn || '').localeCompare(a.registeredOn || '') ||
     (a.pageRank === undefined ? 999 : a.pageRank) - (b.pageRank === undefined ? 999 : b.pageRank);
 
-  const strip = (o) => { const c = Object.assign({}, o); delete c.lastUpdated; delete c.pageRank; return JSON.stringify(c); };
+  const sig = (o) => JSON.stringify([o.code, o.company, o.registeredOn]);
 
   function applyEntries(entries) {
     if (!entries.length) return;
@@ -116,25 +103,16 @@
       const r = e.state === 'registered' ? rank++ : undefined;
       const old = data[e.code];
 
-      let registration;
-      if (e.state === 'registered') registration = 'Registered';
-      else if (e.state === 'not' && old) registration = 'Not registered';
-      else if (e.state === 'unknown' && old) registration = old.registration;
-      else return; // not registered and not tracked -> ignore
+      if (e.state === 'not') { delete data[e.code]; return; }   // cancelled / not registered -> not tracked
+      if (e.state === 'unknown') return;                          // leave whatever we already have
 
-      const fields = { code: e.code, company: e.company, registerBy: e.registerBy, driveDate: e.driveDate,
-                       venue: e.venue, driveStatus: e.driveStatus, portalText: e.portalText };
-      Object.keys(fields).forEach((k) => { if (!fields[k]) delete fields[k]; });
-
-      const next = Object.assign({}, old || {}, fields, { registration });
-      if (registration === 'Registered') {
-        next.registeredOn = (old && old.registeredOn) || today();
-        if (r !== undefined) next.pageRank = r;
-      } else if (registration === 'Not registered') {
-        next.registeredOn = '';
-      }
-      next.lastUpdated = !old || strip(old) !== strip(next) ? stamp() : old.lastUpdated;
-      data[e.code] = next;
+      data[e.code] = {
+        code: e.code,
+        company: e.company || (old && old.company) || '',
+        registration: 'Registered',
+        registeredOn: (old && old.registeredOn) || today(),
+        pageRank: r,
+      };
     });
 
     // Keep only the most recent N
@@ -143,7 +121,7 @@
     if (JSON.stringify(data) !== JSON.stringify(before)) saveData(data);
 
     const kb = Object.keys(before), ka = Object.keys(data);
-    const changed = kb.length !== ka.length || ka.some((k) => !before[k] || strip(before[k]) !== strip(data[k]));
+    const changed = kb.length !== ka.length || ka.some((k) => !before[k] || sig(before[k]) !== sig(data[k]));
     if (changed) GM_setValue(DIRTY, true);
   }
 
@@ -197,32 +175,118 @@
     else setTimeout(maybeAutoFetch, 2000);
   });
 
-  /* ------------------------------ 3. export ------------------------------ */
-  function exportExcel() {
+  /* --------------------------- 3. build + save the file --------------------------- */
+  const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const HAS_PICKER = typeof window.showSaveFilePicker === 'function'; // Chrome / Edge only
+
+  function buildBlob() {
     const rows = Object.values(load()).sort(cmp).map((d) => ({
-      'Company': d.company,
+      'Drive Name': d.company,
       'Drive Code': d.code,
-      'Register By': d.registerBy || '',
-      'Drive Date': d.driveDate || '',
-      'Venue': d.venue || '',
-      'Drive Status': d.driveStatus || '',
-      'Registration Status': d.registration || '',
+      'Registration Status': d.registration || 'Registered',
       'Registered On (first seen)': d.registeredOn || '',
-      'Last Updated': d.lastUpdated || '',
-      'Portal Text': d.portalText || '',
     }));
-    if (!rows.length) { alert('No registered drives recorded yet.'); return; }
+    if (!rows.length) return null;
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws['!cols'] = [30, 22, 18, 22, 26, 12, 20, 24, 22, 30].map((wch) => ({ wch }));
+    ws['!cols'] = [34, 22, 20, 26].map((wch) => ({ wch }));
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Drives');
-    XLSX.writeFile(wb, CFG.fileName);
-    GM_setValue(DIRTY, false);
-    hideBanner();
+    return new Blob([XLSX.write(wb, { bookType: 'xlsx', type: 'array' })], { type: XLSX_MIME });
+  }
+
+  // Remember the chosen file so later saves overwrite it (Chrome / Edge)
+  function idb() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('ums_drive_tracker', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('h');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  }
+  async function getHandle() {
+    try {
+      const db = await idb();
+      return await new Promise((res) => {
+        const q = db.transaction('h').objectStore('h').get('file');
+        q.onsuccess = () => res(q.result || null);
+        q.onerror = () => res(null);
+      });
+    } catch (e) { return null; }
+  }
+  async function setHandle(h) {
+    try {
+      const db = await idb();
+      await new Promise((res) => {
+        const tx = db.transaction('h', 'readwrite');
+        tx.objectStore('h').put(h, 'file');
+        tx.oncomplete = () => res();
+        tx.onerror = () => res();
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  async function writeToHandle(handle, blob) {
+    const w = await handle.createWritable();
+    await w.write(blob);
+    await w.close();
+  }
+
+  async function saveWithPicker(blob, forcePick) {
+    if (!forcePick) {
+      const handle = await getHandle();
+      if (handle) {
+        try {
+          if ((await handle.requestPermission({ mode: 'readwrite' })) === 'granted') {
+            await writeToHandle(handle, blob);
+            return;
+          }
+        } catch (e) { /* file moved or deleted -> ask again below */ }
+      }
+    }
+    const handle = await window.showSaveFilePicker({
+      suggestedName: CFG.fileName,
+      types: [{ description: 'Excel workbook', accept: { [XLSX_MIME]: ['.xlsx'] } }],
+    });
+    await writeToHandle(handle, blob);
+    await setHandle(handle);
+  }
+
+  // Firefox etc.: normal download. Turn on "Always ask you where to save files" to get a Save As dialog.
+  function saveWithDownload(blob) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = CFG.fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  async function exportExcel(forcePick) {
+    const blob = buildBlob();
+    if (!blob) { alert('No registered drives recorded yet.'); return; }
+    try {
+      if (HAS_PICKER) await saveWithPicker(blob, forcePick === true);
+      else saveWithDownload(blob);
+      GM_setValue(DIRTY, false);
+      hideBanner();
+    } catch (err) {
+      if (err && err.name === 'AbortError') return; // you closed the Save dialog
+      console.error('[UMS tracker] save failed', err);
+      alert('Could not save the file: ' + (err && err.message ? err.message : err));
+    }
   }
 
   /* ----------------- 4. "changes made, save?" banner (top window) ----------------- */
   let banner;
+  function makeBtn(label, bg, onClick) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'background:' + bg + ';border:1px solid #6b7280;color:#fff;padding:6px 12px;border-radius:6px;cursor:pointer';
+    b.onclick = onClick;
+    return b;
+  }
   function showBanner() {
     if (banner || window.top !== window.self || !document.body) return;
     banner = document.createElement('div');
@@ -230,23 +294,19 @@
       'position:fixed;bottom:16px;right:16px;z-index:2147483647;background:#1f2937;color:#fff;' +
       'padding:12px 16px;border-radius:8px;font:14px sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.3);' +
       'display:flex;gap:10px;align-items:center';
-    banner.innerHTML = '<span>Placement drive log updated.</span>';
-    const saveBtn = document.createElement('button');
-    saveBtn.textContent = 'Save Excel';
-    saveBtn.style.cssText = 'background:#22c55e;border:0;color:#fff;padding:6px 12px;border-radius:6px;cursor:pointer';
-    saveBtn.onclick = exportExcel;
-    const later = document.createElement('button');
-    later.textContent = 'Later';
-    later.style.cssText = 'background:transparent;border:1px solid #6b7280;color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer';
-    later.onclick = hideBanner;
-    banner.append(saveBtn, later);
+    const msg = document.createElement('span');
+    msg.textContent = 'Placement drive log updated.';
+    banner.append(msg, makeBtn('Save Excel', '#22c55e', () => exportExcel(false)));
+    if (HAS_PICKER) banner.append(makeBtn('Save As…', 'transparent', () => exportExcel(true)));
+    banner.append(makeBtn('Later', 'transparent', hideBanner));
     document.body.appendChild(banner);
   }
   function hideBanner() { if (banner) { banner.remove(); banner = null; } }
   setInterval(() => { if (GM_getValue(DIRTY, false)) showBanner(); }, 2000);
 
   /* ----------------------------- menu commands ----------------------------- */
-  GM_registerMenuCommand('Export drives to Excel', exportExcel);
+  GM_registerMenuCommand('Save drives to Excel', () => exportExcel(false));
+  if (HAS_PICKER) GM_registerMenuCommand('Save As… (choose file)', () => exportExcel(true));
   GM_registerMenuCommand('Refresh from Drive Registration page now', () => {
     if (onRegistrationPage) applyEntries(readEntries(document)); else fetchAndSync();
   });
