@@ -75,12 +75,17 @@
     return map.code !== undefined && map.company !== undefined && map.registered !== undefined ? map : null;
   }
 
-  //   "Click to Cancel Registration" -> registered
-  //   "Click to Register"            -> not registered
+  //   "Click to Cancel Registration" -> registered   (open drive, you're registered)
+  //   "Click to Register"            -> not registered (open drive, you're not registered)
+  //   "Yes"                          -> registered   (closed drive - registration closed, plain Yes/No text)
+  //   "No"                           -> not registered
   //   anything else                  -> unknown (stored drives are left untouched)
   function registrationState(text) {
     if (/cancel/i.test(text)) return 'registered';
     if (/click to register/i.test(text)) return 'not';
+    const t = text.trim().toLowerCase();
+    if (t === 'yes') return 'registered';
+    if (t === 'no') return 'not';
     if (/registered/i.test(text) && !/not registered/i.test(text)) return 'registered';
     return 'unknown';
   }
